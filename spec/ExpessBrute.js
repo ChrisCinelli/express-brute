@@ -1,5 +1,6 @@
 var chai = require('chai'),
-	should = chai.should(),
+    should = chai.should(),
+		expect = chai.expect,
     sinon = require('sinon'),
     sinonChai = require('sinon-chai'),
     ExpressBrute = require("../index"),
@@ -26,13 +27,18 @@ describe("express brute", function () {
 		});
 	});
 	describe("behavior", function () {
-		var brute, store, errorSpy, nextSpy, req, req2;
+		var brute, store, errorSpy, nextSpy, reqIp, reqIp2, req, req2;
 		beforeEach(function () {
 			store = new ExpressBrute.MemoryStore();
 			errorSpy = sinon.stub();
 			nextSpy = sinon.stub();
-			req = function () { return { ip: '1.2.3.4' }; };
-			req2 = function () { return { ip: '5.6.7.8' }; };
+			
+			reqIp = '1.2.3.4';
+			req = function () { return { ip: reqIp }; };
+			
+			reqIp2 = '5.6.7.8';
+			req2 = function () { return { ip: reqIp2 }; };
+			
 			brute = new ExpressBrute(store, {
 				freeRetries: 0,
 				minWait: 10,
@@ -273,7 +279,138 @@ describe("express brute", function () {
 			errorSpy.should.not.have.been.called;
 			errorSpy2.should.have.been.called;
 		});
+		it('blacklist ips', function () {
+			brute.blacklist(reqIp);
+			// This is blocked
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			errorSpy.should.have.been.calledOnce;
+			nextSpy.should.not.have.been.called;
+			// This is not blocked
+			brute.prevent(req2(), new ResponseMock(), nextSpy);
+			errorSpy.should.have.been.calledOnce;
+			nextSpy.should.have.been.calledOnce;
+		}); 
+		it('blacklist ips and then whitelist should re-enable it', function () {
+			brute.blacklist(reqIp);
+			
+			// This is blocked
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			errorSpy.should.have.been.calledOnce;
+			nextSpy.should.not.have.been.called;
+			
+			brute.whitelist(reqIp);
+			
+			// This is not blocked
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			errorSpy.should.have.been.calledOnce;
+			nextSpy.should.have.been.calledOnce;
+		});
+		it ('calls have no limit when whilisted', function () {
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			nextSpy.should.have.been.calledOnce;
+			errorSpy.should.not.have.been.called;
+	
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			nextSpy.should.have.been.calledOnce;
+			errorSpy.should.have.been.calledOnce;
+			
+			brute.whitelist(reqIp);
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			nextSpy.should.have.been.calledThrice;
+			errorSpy.should.have.been.calledOnce;
+		});
+		it ('calls can be whilisted using req.brute.whitelist()', function () {
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			nextSpy.should.have.been.calledOnce;
+			errorSpy.should.not.have.been.called;
+	
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			nextSpy.should.have.been.calledOnce;
+			errorSpy.should.have.been.calledOnce;
+			
+			brute.prevent(req(), new ResponseMock(), function(req, res, next) {
+				nextSpy();
+				req.brute.should.exist;
+				
+				req.brute.whitelist(reqIp);
+				
+				brute.prevent(req(), new ResponseMock(), nextSpy);
+				brute.prevent(req(), new ResponseMock(), nextSpy);
+				nextSpy.should.have.been.calledThrice;
+				errorSpy.should.have.been.calledOnce;
+			});
+		});
+		it('can inspect using status', function (done) {			
+			// This is blocked
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			clock.tick(100);
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			clock.tick(100);
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			clock.tick(100);
+			brute.prevent(req(), new ResponseMock(), nextSpy);
+			brute.status(reqIp, undefined, function(response){
+				expect(response.value.count).to.equal(4);
+				expect(response.value.lastRequest - response.value.firstRequest).to.equal(300);
+				done();
+			});
+		}); 
 	});
+	
+	describe("can store ips and storeKey", function () {
+		var brute, store, errorSpy, nextSpy, reqIp, req;
+		beforeEach(function () {
+			store = new ExpressBrute.MemoryStore();
+			errorSpy = sinon.stub();
+			nextSpy = sinon.stub();
+			reqIp = '1.2.3.4';
+			req = function () { return { ip: reqIp }; };
+			brute = new ExpressBrute(store, {
+				freeRetries: 0,
+				minWait: 10,
+				maxWait: 100,
+				failCallback: errorSpy,
+				storeIp: true,
+				storeKey: true,
+			});
+		});
+		it('for blacklist', function (done) {
+			brute.blacklist(reqIp, 'key');
+			brute.status(reqIp, 'key', function(response){
+				expect(response.value).to.exist;
+				expect(response.value.bl).to.exist;
+				expect(response.value.wl).to.not.exist;
+				expect(response.value.key).to.exist;
+				expect(response.value.ip).to.exist;
+				done();
+			});
+		});
+		it('for whilelist', function (done) {
+			brute.whitelist(reqIp, 'key');
+			brute.status(reqIp, 'key', function(response){
+				expect(response.value).to.exist;
+				expect(response.value.wl).to.exist;
+				expect(response.value.bl).to.not.exist;
+				expect(response.value.key).to.exist;
+				expect(response.value.ip).to.exist;
+				done();
+			});
+		});
+		it('for middleware', function (done) {
+			var mw = brute.getMiddleware({key: 'key' });
+			mw(req(), new ResponseMock(), nextSpy);
+			brute.status(reqIp, 'key', function(response){
+				expect(response.value).to.exist;
+				expect(response.value.wl).to.not.exist;
+				expect(response.value.bl).to.not.exist;
+				expect(response.value.key).to.exist;
+				expect(response.value.ip).to.exist;
+				done();
+			});
+		});
+	});
+	
 	describe("multiple keys", function () {
 		var brute, store, errorSpy, nextSpy, req;
 		beforeEach(function () {
@@ -360,7 +497,7 @@ describe("express brute", function () {
 
 			brute.prevent(firstReq = req(), new ResponseMock(), nextSpy);
 			nextSpy.should.have.been.calledOnce;
-			should.not.exist(firstReq.brute);
+			should.not.exist(firstReq.brute.reset);
 		});
 	});
 	describe("multiple brute instances", function () {
@@ -455,7 +592,7 @@ describe("express brute", function () {
 			failReq.brute.reset(function () {
 				brute.prevent(failReq, new ResponseMock(), successStub);
 				brute2.prevent(failReq, new ResponseMock(), successStub);
-				successStub.should.have.been.called.once;
+				successStub.should.have.been.calledOnce;
 				done();
 			});
 		});
@@ -541,7 +678,7 @@ describe("express brute", function () {
 			});
 		});
 		it('should handle get errors', function () {
-			sinon.stub(store, 'get', function (key, callback) {
+			sinon.stub(store, 'get').callsFake(function (key, callback) {
 				callback(err);
 			});
 			brute.prevent(req, res, nextSpy);
@@ -556,7 +693,7 @@ describe("express brute", function () {
 			nextSpy.should.not.have.been.called;
 		});
 		it('should handle set errors', function () {
-			sinon.stub(store, 'set', function (key, value, lifetime, callback) {
+			sinon.stub(store, 'set').callsFake(function (key, value, lifetime, callback) {
 				callback(err);
 			});
 			brute.prevent(req, res, nextSpy);
@@ -571,7 +708,7 @@ describe("express brute", function () {
 			nextSpy.should.not.have.been.called;
 		});
 		it('should handle reset errors', function () {
-			sinon.stub(store, 'reset', function (key, callback) {
+			sinon.stub(store, 'reset').callsFake(function (key, callback) {
 				callback(err);
 			});
 			var key = 'testKey';
@@ -579,7 +716,8 @@ describe("express brute", function () {
 			storeErrorSpy.should.have.been.calledWithMatch({
 				message: "Cannot reset request count",
 				parent: err,
-				key: ExpressBrute._getKey(['1.2.3.4', brute.name, key]),
+				key: key,
+				storeKey: ExpressBrute._getKey(['1.2.3.4', brute.name, key]),
 				ip: '1.2.3.4'
 			});
 			errorSpy.should.not.have.been.called;
@@ -592,15 +730,44 @@ describe("express brute", function () {
 				maxWait: 100,
 				failCallback: errorSpy
 			});
-			sinon.stub(store, 'get', function (key, callback) {
+			sinon.stub(store, 'get').callsFake(function (key, callback) {
 				callback(err);
 			});
 			(function () {
 				brute.prevent(req, res, nextSpy);
-			}).should.throw({
-				message: 'Cannot get request count',
-				parent: err
+			}).should.throw;
+			errorSpy.should.not.have.been.called;
+			nextSpy.should.not.have.been.called;
+		});
+		it('should throw an exception on blacklist', function () {
+			brute = new ExpressBrute(store, {
+				freeRetries: 0,
+				minWait: 10,
+				maxWait: 100,
+				failCallback: errorSpy
 			});
+			sinon.stub(store, 'get').callsFake(function (key, callback) {
+				callback(err);
+			});
+			(function () {
+				brute.prevent(req, res, nextSpy);
+			}).should.throw;
+			errorSpy.should.not.have.been.called;
+			nextSpy.should.not.have.been.called;
+		});
+		it('should throw an exception on whitelist', function () {
+			brute = new ExpressBrute(store, {
+				freeRetries: 0,
+				minWait: 10,
+				maxWait: 100,
+				failCallback: errorSpy
+			});
+			sinon.stub(store, 'get').callsFake(function (key, callback) {
+				callback(err);
+			});
+			(function () {
+				brute.prevent(req, res, nextSpy);
+			}).should.throw;
 			errorSpy.should.not.have.been.called;
 			nextSpy.should.not.have.been.called;
 		});

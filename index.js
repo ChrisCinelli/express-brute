@@ -3,12 +3,15 @@ var crypto = require('crypto');
 
 var ExpressBrute = module.exports = function (store, options) {
 	var i;
-	ExpressBrute.instanceCount++;
-	this.name = "brute"+ExpressBrute.instanceCount;
-	_.bindAll(this, 'reset', 'getMiddleware');
+	
+	_.bindAll(this, 'reset', 'whitelist', 'blacklist', 'status', 'getMiddleware');
 
 	// set options
 	this.options = _.extend({}, ExpressBrute.defaults, options);
+	ExpressBrute.instanceCount++;
+	this.name = this.options.name || ("brute" + ExpressBrute.instanceCount);
+	ExpressBrute.instances[this.name] = this;
+	
 	if (this.options.minWait < 1) {
 		this.options.minWait = 1;
 	}
@@ -31,6 +34,17 @@ var ExpressBrute = module.exports = function (store, options) {
 	// generate "prevent" middleware
 	this.prevent = this.getMiddleware();
 };
+
+expressBruteRequestObject = {};
+// Call all the instances
+['whitelist', 'blacklist', 'status'].map(function(funcName){
+	expressBruteRequestObject[funcName] = function() {
+		for (var i in ExpressBrute.instances) {
+			ExpressBrute.instances[i][funcName].apply(ExpressBrute.instances[i], arguments);
+		}
+	}
+});
+
 ExpressBrute.prototype.getMiddleware = function (options) {
 	// standardize input
 	options = _.extend({}, options);
@@ -44,17 +58,17 @@ ExpressBrute.prototype.getMiddleware = function (options) {
 
 	// create middleware
 	return _.bind(function (req, res, next) {
+		var ip = req.ip;
 		keyFunc(req, res, _.bind(function (key) {
-			if(!options.ignoreIP) {
-				key = ExpressBrute._getKey([req.ip, this.name, key]);
-			} else {
-				key = ExpressBrute._getKey([this.name, key]);
-			}
+			var storeKey = this.getKey(!options.ignoreIP && ip, key);
+		
+			// Expose functions
+			req.brute = req.brute || _.extend({ instances: ExpressBrute.instances }, expressBruteRequestObject);
 
 			// attach a simpler "reset" function to req.brute.reset
 			if (this.options.attachResetToRequest) {
 				var reset = _.bind(function (callback) {
-					this.store.reset(key, function (err) {
+					this.store.reset(storeKey, function (err) {
 						if (typeof callback == 'function') {
 							process.nextTick(function () {
 								callback(err);
@@ -72,14 +86,13 @@ ExpressBrute.prototype.getMiddleware = function (options) {
 						});
 					};
 				}
-				req.brute = {
-					reset: reset
-				};
+				
+				req.brute.reset = reset;
 			}
 
 
 			// filter request
-			this.store.get(key, _.bind(function (err, value) {
+			this.store.get(storeKey, _.bind(function (err, value) {
 				if (err) {
 					this.options.handleStoreError({
 						req: req,
@@ -96,6 +109,17 @@ ExpressBrute.prototype.getMiddleware = function (options) {
 					lastValidRequestTime = this.now(),
 					firstRequestTime = lastValidRequestTime;
 				if (value) {
+					if (value.wl) {
+						typeof next == 'function' && next();
+						return;
+					}
+					
+					if (value.bl) {
+						var failCallback = getFailCallback();
+						typeof failCallback === 'function' && failCallback(req, res, next, -1);
+						return;
+					}
+					
 					count = value.count;
 					lastValidRequestTime = value.lastRequest.getTime();
 					firstRequestTime = value.firstRequest.getTime();
@@ -124,11 +148,19 @@ ExpressBrute.prototype.getMiddleware = function (options) {
 				}
 
 				if (nextValidRequestTime <= this.now() || count <= this.options.freeRetries) {
-					this.store.set(key, {
+					var valueToStore = {
 						count: count+1,
 						lastRequest: new Date(this.now()),
 						firstRequest: new Date(firstRequestTime)
-					}, remainingLifetime, _.bind(function (err) {
+					}; 
+					if (this.options.storeIp) {
+						valueToStore.ip = ip;
+					}
+					if (this.options.storeKey) {
+						valueToStore.key = key;
+					}
+					
+					this.store.set(storeKey, valueToStore, remainingLifetime, _.bind(function (err) {
 						if (err) {
 							this.options.handleStoreError({
 								req: req,
@@ -150,13 +182,15 @@ ExpressBrute.prototype.getMiddleware = function (options) {
 	}, this);
 };
 ExpressBrute.prototype.reset = function (ip, key, callback) {
-	key = ExpressBrute._getKey([ip, this.name, key]);
-	this.store.reset(key, _.bind(function (err) {
+	var storeKey = this.getKey(ip, key);
+	
+	this.store.reset(storeKey, _.bind(function (err) {
 		if (err) {
 			this.options.handleStoreError({
 				message: "Cannot reset request count",
 				parent: err,
 				key: key,
+				storeKey: storeKey,
 				ip: ip
 			});
 		} else {
@@ -168,12 +202,118 @@ ExpressBrute.prototype.reset = function (ip, key, callback) {
 		}
 	},this));
 };
+
+ExpressBrute.prototype.blacklist = function (ip, key, callback) {
+	var storeKey = this.getKey(ip, key);
+
+	var valueToStore = {
+		bl: new Date(this.now()),
+	};
+	if (this.options.storeIp) {
+		valueToStore.ip = ip;
+	}
+	if (this.options.storeKey) {
+		valueToStore.key = key;
+	}
+	
+	this.store.set(storeKey, valueToStore, 0, _.bind(function (err) {
+		if (err) {
+			this.options.handleStoreError({
+				req: req,
+				res: res,
+				next: next,
+				message: "Blacklist error",
+				parent: err
+			});
+		} else {
+			if (typeof callback == 'function') {
+				process.nextTick(_.bind(function () {
+					callback.apply(this, arguments);
+				}, this));
+			}
+		}
+	},this));
+};
+
+ExpressBrute.prototype.whitelist = function (ip, key, callback) {
+	var storeKey = this.getKey(ip, key);
+
+	var valueToStore = {
+		wl: new Date(this.now()),
+	};
+	if (this.options.storeIp) {
+		valueToStore.ip = ip;
+	}
+	if (this.options.storeKey) {
+		valueToStore.key = key;
+	}
+	
+	this.store.set(storeKey, valueToStore, 0, _.bind(function (err) {
+		if (err) {
+			this.options.handleStoreError({
+				req: req,
+				res: res,
+				next: next,
+				message: "Blacklist error",
+				parent: err
+			});
+		} else {
+			if (typeof callback == 'function') {
+				process.nextTick(_.bind(function () {
+					callback.apply(this, arguments);
+				}, this));
+			}
+		}
+	},this));
+};
+ExpressBrute.prototype.getBlAndWlKeys = function (callback) {
+	if (!this.store.getBlAndWlKeys) return callback(new Error('This ExpressBrute store does not support getBlAndWlKeys'));
+	if (!this.options.storeIp) return callback(new Error('In order to use getBlAndWlKeys, storeIp must be true'));
+  this.store.getBlAndWlKeys(callback);
+}
+ExpressBrute.prototype.status = function (ip, key, callback) {
+	var storeKey = this.getKey(ip, key);
+	
+	this.store.get(storeKey, _.bind(function (err, value) {
+		if (err) {
+			this.options.handleStoreError({
+				req: req,
+				res: res,
+				next: next,
+				message: "Cannot get request count",
+				parent: err
+			});
+		} else {
+			if (typeof callback == 'function') {
+				process.nextTick(_.bind(function () {
+					callback.call(this, { storeKey: storeKey, value: value});
+				}, this));
+			}
+		}
+	},this));
+};
+
+
 ExpressBrute.prototype.now = function () {
 	return Date.now();
 };
 
+ExpressBrute.prototype.getKey = function (ip, key) {
+	var ret;
+	if(ip) {
+		ret = this.options.storeHashKey([ip, this.name, key]);
+		// console.log('getKey (', ip, this.name, key, ')', ret);
+
+	} else {
+		ret = this.options.storeHashKey([this.name, key]);
+		// console.log('getKey (', this.name, key,	 ')', ret);
+
+	}
+	return ret;
+}
+
 var setRetryAfter = function (res, nextValidRequestDate) {
-	var secondUntilNextRequest = Math.ceil((nextValidRequestDate.getTime() - Date.now())/1000);
+	var secondUntilNextRequest = nextValidRequestDate !== -1 ? Math.ceil((nextValidRequestDate.getTime() - Date.now())/1000) : 1000000000;
 	res.header('Retry-After', secondUntilNextRequest);
 };
 ExpressBrute.FailTooManyRequests = function (req, res, next, nextValidRequestDate) {
@@ -215,6 +355,9 @@ ExpressBrute.defaults = {
 	refreshTimeoutOnRequest: true,
 	minWait: 500,
 	maxWait: 1000*60*15, // 15 minutes
+	storeHashKey: ExpressBrute._getKey,
+	storeIp: false,
+	storeKey: false,
 	failCallback: ExpressBrute.FailTooManyRequests,
 	handleStoreError: function (err) {
 		throw {
@@ -224,3 +367,4 @@ ExpressBrute.defaults = {
 	}
 };
 ExpressBrute.instanceCount = 0;
+ExpressBrute.instances = {};
