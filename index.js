@@ -192,6 +192,11 @@ ExpressBrute.FailMark = function (req, res, next, nextValidRequestDate) {
 	res.nextValidRequestDate = nextValidRequestDate;
 	next();
 };
+ExpressBrute.FailSilently = function (req, res, next, nextValidRequestDate) {
+	res.status(200);
+	res.send({});
+};
+
 ExpressBrute._getKey = function (arr) {
 	var hash = crypto.createHash('sha256');
 	_(arr).each(function (part) {
