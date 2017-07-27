@@ -193,13 +193,13 @@ ExpressBrute.FailMark = function (req, res, next, nextValidRequestDate) {
 	next();
 };
 ExpressBrute._getKey = function (arr) {
-	var key = '';
+	var hash = crypto.createHash('sha256');
 	_(arr).each(function (part) {
 		if (part) {
-			key += crypto.createHash('sha256').update(part).digest('base64');
+			hash.update(part);
 		}
 	});
-	return crypto.createHash('sha256').update(key).digest('base64');
+	return hash.digest('base64');
 };
 
 ExpressBrute.MemoryStore = require('./lib/MemoryStore');
